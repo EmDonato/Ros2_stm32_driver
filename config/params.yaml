@@ -1,0 +1,8 @@
+stm32_driver:
+  ros__parameters:
+    port: /dev/ttyACM0
+    baudrate: 115200
+    frequency_ms: 5
+    radius: 0.0346
+    wheel_base: 0.2
+    control_service: control/command

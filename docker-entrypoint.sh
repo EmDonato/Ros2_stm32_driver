@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 source "/opt/ros/${ROS_DISTRO}/setup.bash"
-source "${MODULE_SETUP:-/opt/robot_module/setup.bash}"
+source "/ws/install/setup.bash"
+
 exec "$@"

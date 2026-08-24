@@ -1,16 +1,22 @@
 services:
-  drivers:
-    image: robot-modules/drivers:humble
+  stm32_driver:
+    image: robot-drivers/stm32-driver:humble
+    platform: ${ROBOT_PLATFORM:-linux/arm64}
     build:
-      context: ..
-      dockerfile: drivers/Dockerfile
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: stm32
+        UID: ${HOST_UID:-1000}
+        GID: ${HOST_GID:-1000}
+      additional_contexts:
+        interfaces: ${INTERFACES_CONTEXT:-../../interfaces}
     network_mode: host
-    ipc: host
     privileged: true
     volumes:
       - /dev:/dev
       - /run/udev:/run/udev:ro
+      - ./config:/ws/config:ro
     environment:
       RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
-    command: sleep infinity

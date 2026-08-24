@@ -1,17 +1,20 @@
 <?xml version="1.0"?>
-<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>lidar_driver</name>
-  <version>0.0.0</version>
-  <description>lidar 2d LD06 driver</description>
+  <name>stm32_driver</name>
+  <version>0.2.0</version>
+  <description>ROS 2 serial driver for the STM32 Nucleo F303RE robot controller.</description>
   <maintainer email="mcf.donato@gmail.com">Emanuele Donato</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>boost</depend>
+  <depend>geometry_msgs</depend>
   <depend>rclcpp</depend>
+  <depend>robot_interfaces</depend>
   <depend>sensor_msgs</depend>
-
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
