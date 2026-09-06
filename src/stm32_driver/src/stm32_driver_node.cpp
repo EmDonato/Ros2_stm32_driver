@@ -493,7 +493,7 @@ private:
       checksum ^= payload_bytes[index];
     }
 
-    std::vector<uint8_t> packet = {HDR1, HDR2, payload_length, CMD_VEL_ID};
+    std::vector<uint8_t> packet = {HDR1, HDR2, CMD_VEL_ID, payload_length};
     packet.insert(packet.end(), payload_bytes, payload_bytes + payload_length);
     packet.push_back(checksum);
 
@@ -506,7 +506,7 @@ private:
   {
     constexpr uint8_t payload_length = 0;
     const uint8_t checksum = HDR1 ^ HDR2 ^ payload_length ^ command;
-    const uint8_t packet[5] = {HDR1, HDR2, payload_length, command, checksum};
+    const uint8_t packet[5] = {HDR1, HDR2, command, payload_length, checksum};
 
     if (tcflush(serial_fd_, TCOFLUSH) != 0) {
       RCLCPP_WARN(this->get_logger(), "Could not flush serial output: %s", std::strerror(errno));
