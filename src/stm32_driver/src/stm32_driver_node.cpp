@@ -159,9 +159,7 @@ public:
     ref_sub_ =
       create_subscription<geometry_msgs::msg::TwistStamped>(
       "/cmd_vel",
-      rclcpp::QoS(
-        rclcpp::KeepLast(1))
-      .best_effort(),
+      rclcpp::SensorDataQoS(),
 
       std::bind(
         &Stm32Driver::velocity_callback_,
