@@ -1,8 +1,14 @@
 stm32_driver:
   ros__parameters:
-    port: /dev/ttyACM0
+
+    port: "/dev/ttyACM0"
     baudrate: 115200
+    #serial reading fs
     frequency_ms: 5
+    cmd_frequency_ms: 20
+    cmd_timeout_s: 0.5
+
     radius: 0.0346
     wheel_base: 0.2
-    control_service: control/command
+
+    control_service: "control/command"
