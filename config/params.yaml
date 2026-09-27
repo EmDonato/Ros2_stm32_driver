@@ -5,10 +5,39 @@ stm32_driver:
     baudrate: 115200
     #serial reading fs
     frequency_ms: 5
-    cmd_frequency_ms: 20
-    cmd_timeout_s: 0.5
+    cmd_frequency_ms: 10
+    cmd_timeout_s: 60.0
 
     radius: 0.0346
     wheel_base: 0.2
+
+    # Frame names used by the sensor messages, encoder odometry and TF.
+    base_frame_id: "base_link"
+    imu_parent_frame_id: "chassis"
+    imu_frame_id: "imu_link"
+    encoder_odom_frame_id: "enc_odom"
+    # Only the physical chassis -> imu_link mounting TF is published here.
+    # Encoder odometry is a topic only; EKF owns odom -> base_link.
+    publish_imu_tf: true
+
+    # Raw sensor -> imu_link: X forward, Y left, Z up.
+    # Assumes the observed raw axes are X forward, Y right, Z down.
+    imu_flip_x: true
+    # Firmware acceleration in g; use 1.0 if firmware already sends m/s^2.
+    imu_acceleration_scale: 9.80665
+    # -1 disables orientation use by consumers until validated.
+    # Set a measured positive isotropic variance in rad^2 to enable it.
+    imu_orientation_variance: -1.0
+
+    # Static chassis -> imu_link mounting transform (metres/radians).
+    # Translation: measured IMU position. Rotation: corrected imu_link relative
+    # to chassis; keep zero for robot-aligned axes, do not repeat imu_flip_x.
+    imu_transform:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
 
     control_service: "control/command"

@@ -15,7 +15,6 @@ RUN groupadd --gid ${GID} ${USERNAME} && \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
-    libboost-dev \
     python3-colcon-common-extensions \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*

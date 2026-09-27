@@ -1,29 +1,33 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
-#include "parsing_types.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "stm32_driver/differential_drive_odometry.hpp"
+#include "stm32_driver/packet_parser.hpp"
+#include "stm32_driver/parsing_types.hpp"
+#include "stm32_driver/serial_port.hpp"
+#include "stm32_driver/stm32_driver_factory.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "robot_interfaces/msg/wheel_speeds.hpp"
+#include "robot_interfaces/msg/imu_euler.hpp"
 #include "robot_interfaces/srv/control_command.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "sensor_msgs/msg/magnetic_field.hpp"
 #include "std_msgs/msg/bool.hpp"
 
-#include <boost/circular_buffer.hpp>
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 
-#include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <fcntl.h>
 #include <memory>
-#include <poll.h>
 #include <stdexcept>
 #include <string>
-#include <system_error>
-#include <termios.h>
-#include <unistd.h>
+#include <utility>
 #include <vector>
 
 
@@ -34,8 +38,7 @@ public:
   : Node("stm32_driver"),
     verbose_logger_(this->get_logger().get_child("verbose_logger")),
     last_stamp_(0, 0, RCL_ROS_TIME),
-    last_enc_(0, 0, RCL_ROS_TIME),
-    last_cmd_rx_(0, 0, RCL_ROS_TIME)
+    last_enc_(0, 0, RCL_ROS_TIME)
   {
     // ============================================================
     // Parameters
@@ -81,7 +84,26 @@ public:
       "control_service",
       "control/command");
 
+    base_frame_id_ = declare_parameter<std::string>("base_frame_id", "base_link");
+    imu_parent_frame_id_ = declare_parameter<std::string>("imu_parent_frame_id", "chassis");
+    imu_frame_id_ = declare_parameter<std::string>("imu_frame_id", "imu_link");
+    encoder_odom_frame_id_ =
+      declare_parameter<std::string>("encoder_odom_frame_id", "enc_odom");
+    publish_imu_tf_ = declare_parameter<bool>("publish_imu_tf", true);
+    imu_x_ = declare_parameter<double>("imu_transform.x", 0.0);
+    imu_y_ = declare_parameter<double>("imu_transform.y", 0.0);
+    imu_z_ = declare_parameter<double>("imu_transform.z", 0.0);
+    imu_roll_ = declare_parameter<double>("imu_transform.roll", 0.0);
+    imu_pitch_ = declare_parameter<double>("imu_transform.pitch", 0.0);
+    imu_yaw_ = declare_parameter<double>("imu_transform.yaw", 0.0);
+
+    imu_flip_x_ = declare_parameter<bool>("imu_flip_x", true);
+    imu_acceleration_scale_ = declare_parameter<double>("imu_acceleration_scale", 9.80665);
+    imu_orientation_variance_ = declare_parameter<double>("imu_orientation_variance", -1.0);
+
     validate_parameters_();
+
+    odometry_ = std::make_unique<stm32_driver::DifferentialDriveOdometry>(wheel_base_);
 
 
     // ============================================================
@@ -89,7 +111,7 @@ public:
     // ============================================================
 
     try {
-      open_serial_();
+      serial_port_ = std::make_unique<stm32_driver::SerialPort>(port_, baudrate_);
 
     } catch (const std::exception & error) {
 
@@ -116,6 +138,20 @@ public:
       create_publisher<geometry_msgs::msg::TwistStamped>(
       "enc/twist_meas",
       rclcpp::SensorDataQoS());
+
+    odom_pub_ =
+      create_publisher<nav_msgs::msg::Odometry>(
+      "odom/solo",
+      rclcpp::QoS(10));
+
+    imu_debug_pub_ = create_publisher<robot_interfaces::msg::ImuEuler>(
+      "debug/imu", rclcpp::QoS(10));
+
+    if (publish_imu_tf_) {
+      static_tf_broadcaster_ =
+        std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+      publish_imu_transform_();
+    }
 
 
     joint_pub_ =
@@ -256,14 +292,7 @@ public:
 
   ~Stm32Driver() override
   {
-    if (serial_fd_ >= 0) {
-
-      close(serial_fd_);
-
-      RCLCPP_INFO(
-        this->get_logger(),
-        "Serial port closed");
-    }
+    RCLCPP_INFO(this->get_logger(), "Serial port closed");
   }
 
 
@@ -293,35 +322,37 @@ private:
   // Velocity TX period to STM32
   int cmd_frequency_ms_{20};
 
-  int serial_fd_{-1};
-
-  pollfd serial_poll_{};
-
-  uint8_t read_buffer_[128]{};
-
-  boost::circular_buffer<uint8_t>
-  receive_buffer_{512};
-
   double radius_{0.0346};
 
   double wheel_base_{0.2};
 
   double cmd_timeout_s_{0.5};
 
+  std::unique_ptr<stm32_driver::SerialPort> serial_port_;
+  std::unique_ptr<stm32_driver::DifferentialDriveOdometry> odometry_;
+
+  std::string base_frame_id_{"base_link"};
+  std::string imu_parent_frame_id_{"chassis"};
+  std::string imu_frame_id_{"imu_link"};
+  std::string encoder_odom_frame_id_{"enc_odom"};
+  bool imu_flip_x_{true};
+  double imu_acceleration_scale_{9.80665};
+  double imu_orientation_variance_{-1.0};
+  bool publish_imu_tf_{true};
+  double imu_x_{0.0};
+  double imu_y_{0.0};
+  double imu_z_{0.0};
+  double imu_roll_{0.0};
+  double imu_pitch_{0.0};
+  double imu_yaw_{0.0};
+
 
   // ============================================================
   // Parser
   // ============================================================
 
-  ParseState parse_state_{
-    ParseState::WAIT_HEADER1};
-
+  stm32_driver::PacketParser packet_parser_;
   uint8_t message_type_{0};
-
-  uint8_t message_length_{0};
-
-  uint8_t checksum_{0};
-
   std::vector<uint8_t> payload_;
 
 
@@ -348,9 +379,6 @@ private:
   // Have we ever received a valid command?
   bool have_cmd_{false};
 
-  // Prevent repeated watchdog warning
-  bool watchdog_active_{false};
-
 
   // ============================================================
   // Time state
@@ -361,9 +389,6 @@ private:
 
   // Local time of previous encoder message
   rclcpp::Time last_enc_;
-
-  // Local arrival time of latest VALID cmd_vel
-  rclcpp::Time last_cmd_rx_;
 
 
   // ============================================================
@@ -388,6 +413,15 @@ private:
   rclcpp::Publisher<
     geometry_msgs::msg::TwistStamped>::SharedPtr
   enc_pub_;
+
+  rclcpp::Publisher<
+    nav_msgs::msg::Odometry>::SharedPtr
+  odom_pub_;
+
+  rclcpp::Publisher<robot_interfaces::msg::ImuEuler>::SharedPtr imu_debug_pub_;
+
+  std::unique_ptr<tf2_ros::StaticTransformBroadcaster>
+  static_tf_broadcaster_;
 
 
   rclcpp::Publisher<
@@ -457,178 +491,54 @@ private:
     }
 
 
+    if (!std::isfinite(imu_acceleration_scale_) || imu_acceleration_scale_ <= 0.0 ||
+      !std::isfinite(imu_orientation_variance_) ||
+      (imu_orientation_variance_ != -1.0 && imu_orientation_variance_ <= 0.0))
+    {
+      throw std::invalid_argument(
+              "IMU scale must be positive; orientation variance must be positive or -1");
+    }
+
     if (cmd_timeout_s_ <= 0.0) {
 
       throw std::invalid_argument(
               "cmd_timeout_s must be greater than zero");
     }
-  }
 
+    if (
+      base_frame_id_.empty() || imu_parent_frame_id_.empty() || imu_frame_id_.empty() ||
+      encoder_odom_frame_id_.empty())
+    {
+      throw std::invalid_argument("TF frame IDs must not be empty");
+    }
 
-  // ============================================================
-  // Baudrate
-  // ============================================================
-
-  static speed_t termios_baud_(
-    int baudrate)
-  {
-    switch (baudrate) {
-
-      case 9600:
-        return B9600;
-
-      case 19200:
-        return B19200;
-
-      case 38400:
-        return B38400;
-
-      case 57600:
-        return B57600;
-
-      case 115200:
-        return B115200;
-
-      case 230400:
-        return B230400;
-
-      default:
-
-        throw std::invalid_argument(
-                "Unsupported baudrate: " +
-                std::to_string(
-                  baudrate));
+    if (
+      base_frame_id_ == imu_frame_id_ || imu_parent_frame_id_ == imu_frame_id_ ||
+      encoder_odom_frame_id_ == base_frame_id_)
+    {
+      throw std::invalid_argument(
+              "Odometry/base/IMU frame IDs must be distinct and IMU cannot parent itself");
     }
   }
 
 
-  // ============================================================
-  // Open serial
-  // ============================================================
-
-  void open_serial_()
+  void publish_imu_transform_()
   {
-    serial_fd_ =
-      open(
-      port_.c_str(),
-      O_RDWR |
-      O_NOCTTY |
-      O_NONBLOCK);
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.stamp = this->now();
+    transform.header.frame_id = imu_parent_frame_id_;
+    transform.child_frame_id = imu_frame_id_;
+    transform.transform.translation.x = imu_x_;
+    transform.transform.translation.y = imu_y_;
+    transform.transform.translation.z = imu_z_;
 
-
-    if (serial_fd_ < 0) {
-
-      throw std::system_error(
-              errno,
-              std::generic_category(),
-              "Failed to open " +
-              port_);
-    }
-
-
-    try {
-
-      termios tty{};
-
-
-      if (tcgetattr(
-          serial_fd_,
-          &tty) != 0)
-      {
-        throw std::system_error(
-                errno,
-                std::generic_category(),
-                "tcgetattr failed");
-      }
-
-
-      const speed_t speed =
-        termios_baud_(
-        baudrate_);
-
-
-      if (
-        cfsetispeed(
-          &tty,
-          speed) != 0 ||
-
-        cfsetospeed(
-          &tty,
-          speed) != 0)
-      {
-        throw std::system_error(
-                errno,
-                std::generic_category(),
-                "Setting baudrate failed");
-      }
-
-
-      tty.c_cflag |=
-        CLOCAL | CREAD;
-
-      tty.c_cflag &=
-        ~CSIZE;
-
-      tty.c_cflag |=
-        CS8;
-
-      tty.c_cflag &=
-        ~(PARENB |
-        CSTOPB |
-        CRTSCTS);
-
-
-      tty.c_lflag = 0;
-
-      tty.c_iflag = 0;
-
-      tty.c_oflag = 0;
-
-      tty.c_cc[VMIN] = 0;
-
-      tty.c_cc[VTIME] = 0;
-
-
-      if (
-        tcsetattr(
-          serial_fd_,
-          TCSANOW,
-          &tty) != 0)
-      {
-        throw std::system_error(
-                errno,
-                std::generic_category(),
-                "tcsetattr failed");
-      }
-
-
-      if (
-        tcflush(
-          serial_fd_,
-          TCIOFLUSH) != 0)
-      {
-        throw std::system_error(
-                errno,
-                std::generic_category(),
-                "tcflush failed");
-      }
-
-    } catch (...) {
-
-      close(
-        serial_fd_);
-
-      serial_fd_ = -1;
-
-      throw;
-    }
-
-
-    serial_poll_.fd =
-      serial_fd_;
-
-    serial_poll_.events =
-      POLLIN;
+    tf2::Quaternion rotation;
+    rotation.setRPY(imu_roll_, imu_pitch_, imu_yaw_);
+    transform.transform.rotation.x = rotation.x();
+    transform.transform.rotation.y = rotation.y();
+    transform.transform.rotation.z = rotation.z();
+    transform.transform.rotation.w = rotation.w();
+    static_tf_broadcaster_->sendTransform(transform);
   }
 
 
@@ -638,208 +548,24 @@ private:
 
   void read_serial_()
   {
-    int poll_result = 0;
-
-
-    while (
-      (poll_result =
-      poll(
-        &serial_poll_,
-        1,
-        0)) > 0)
-    {
-      if (
-        (serial_poll_.revents &
-        POLLIN) == 0)
-      {
-        break;
+    try {
+      const auto bytes = serial_port_->read_available();
+      auto batch = packet_parser_.consume(bytes);
+      if (batch.checksum_errors > 0) {
+        RCLCPP_WARN(
+          this->get_logger(), "%zu serial packet(s) failed checksum validation",
+          batch.checksum_errors);
       }
-
-
-      const ssize_t bytes_read =
-        read(
-        serial_fd_,
-        read_buffer_,
-        sizeof(
-          read_buffer_));
-
-
-      if (bytes_read > 0) {
-
-        for (
-          ssize_t index = 0;
-          index < bytes_read;
-          ++index)
-        {
-          receive_buffer_.push_back(
-            read_buffer_[index]);
-        }
-
-      } else if (
-        bytes_read < 0 &&
-        errno != EAGAIN &&
-        errno != EWOULDBLOCK &&
-        errno != EINTR)
-      {
-        RCLCPP_ERROR(
-          this->get_logger(),
-          "Serial read failed: %s",
-          std::strerror(
-            errno));
-
-        break;
+      for (auto & packet : batch.packets) {
+        message_type_ = packet.type;
+        payload_ = std::move(packet.payload);
+        handle_message_();
       }
-    }
-
-
-    if (
-      poll_result < 0 &&
-      errno != EINTR)
-    {
-      RCLCPP_ERROR(
-        this->get_logger(),
-        "Serial poll failed: %s",
-        std::strerror(
-          errno));
-    }
-
-
-    parse_();
-  }
-
-
-  // ============================================================
-  // Parser
-  // ============================================================
-
-  void parse_()
-  {
-    while (
-      !receive_buffer_.empty())
-    {
-      const uint8_t byte =
-        receive_buffer_.front();
-
-
-      receive_buffer_.pop_front();
-
-
-      switch (parse_state_) {
-
-        case ParseState::WAIT_HEADER1:
-
-          if (byte == HDR1) {
-
-            checksum_ =
-              byte;
-
-            parse_state_ =
-              ParseState::WAIT_HEADER2;
-          }
-
-          break;
-
-
-        case ParseState::WAIT_HEADER2:
-
-          if (byte == HDR2) {
-
-            checksum_ ^=
-              byte;
-
-            parse_state_ =
-              ParseState::WAIT_TYPE;
-
-          } else {
-
-            parse_state_ =
-              ParseState::WAIT_HEADER1;
-          }
-
-          break;
-
-
-        case ParseState::WAIT_TYPE:
-
-          message_type_ =
-            byte;
-
-          checksum_ ^=
-            byte;
-
-          parse_state_ =
-            ParseState::WAIT_LEN;
-
-          break;
-
-
-        case ParseState::WAIT_LEN:
-
-          message_length_ =
-            byte;
-
-          payload_.clear();
-
-          checksum_ ^=
-            byte;
-
-
-          parse_state_ =
-            message_length_ == 0
-            ?
-            ParseState::WAIT_CHECKSUM
-            :
-            ParseState::WAIT_PAYLOAD;
-
-          break;
-
-
-        case ParseState::WAIT_PAYLOAD:
-
-          payload_.push_back(
-            byte);
-
-          checksum_ ^=
-            byte;
-
-
-          if (
-            payload_.size() >=
-            message_length_)
-          {
-            parse_state_ =
-              ParseState::WAIT_CHECKSUM;
-          }
-
-          break;
-
-
-        case ParseState::WAIT_CHECKSUM:
-
-          if (checksum_ == byte) {
-
-            handle_message_();
-
-          } else {
-
-            RCLCPP_WARN(
-              this->get_logger(),
-              "Checksum mismatch for type "
-              "0x%02X: calculated 0x%02X, "
-              "received 0x%02X",
-              message_type_,
-              checksum_,
-              byte);
-          }
-
-
-          parse_state_ =
-            ParseState::WAIT_HEADER1;
-
-          break;
-      }
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(this->get_logger(), "%s", error.what());
     }
   }
+
 
 
   // ============================================================
@@ -930,7 +656,7 @@ private:
       now;
 
     imu.header.frame_id =
-      "imu_link";
+      imu_frame_id_;
 
 
     tf2::Quaternion orientation;
@@ -941,6 +667,21 @@ private:
       data[1],
       data[2]);
 
+
+    // R maps raw sensor vectors into imu_link: (x, y, z) -> (x, -y, -z).
+    // Orientation maps body to world, hence q_world_link = q_world_raw * inverse(q_link_raw).
+    const double yz_sign = imu_flip_x_ ? -1.0 : 1.0;
+    if (imu_flip_x_) {
+      orientation *= tf2::Quaternion(-1.0, 0.0, 0.0, 0.0);
+    }
+    orientation.normalize();
+    if (imu_orientation_variance_ < 0.0) {
+      imu.orientation_covariance[0] = -1.0;
+    } else {
+      imu.orientation_covariance[0] = imu_orientation_variance_;
+      imu.orientation_covariance[4] = imu_orientation_variance_;
+      imu.orientation_covariance[8] = imu_orientation_variance_;
+    }
 
     imu.orientation.x =
       orientation.x();
@@ -956,23 +697,23 @@ private:
 
 
     imu.linear_acceleration.x =
-      data[3];
+      data[3] * imu_acceleration_scale_;
 
     imu.linear_acceleration.y =
-      data[4];
+      data[4] * imu_acceleration_scale_ * yz_sign;
 
     imu.linear_acceleration.z =
-      data[5];
+      data[5] * imu_acceleration_scale_ * yz_sign;
 
 
     imu.angular_velocity.x =
       data[6];
 
     imu.angular_velocity.y =
-      data[7];
+      data[7] * yz_sign;
 
     imu.angular_velocity.z =
-      data[8];
+      data[8] * yz_sign;
 
 
     imu.angular_velocity_covariance = {
@@ -995,8 +736,27 @@ private:
     };
 
 
+    // Covariance follows C_link = scale^2 * R * C_raw * R^T.
+    const double signs[3] = {1.0, yz_sign, yz_sign};
+    for (size_t row = 0; row < 3; ++row) {
+      for (size_t col = 0; col < 3; ++col) {
+        imu.linear_acceleration_covariance[row * 3 + col] *=
+          imu_acceleration_scale_ * imu_acceleration_scale_ * signs[row] * signs[col];
+        imu.angular_velocity_covariance[row * 3 + col] *= signs[row] * signs[col];
+      }
+    }
+
     imu_pub_->publish(
       imu);
+    // Report the same corrected orientation as /imu, not integrated gyro attitude.
+    robot_interfaces::msg::ImuEuler debug;
+    debug.header = imu.header;
+    tf2::Matrix3x3(orientation).getRPY(debug.roll_rad, debug.pitch_rad, debug.yaw_rad);
+    constexpr double rad_to_deg = 180.0 / 3.14159265358979323846;
+    debug.roll_deg = debug.roll_rad * rad_to_deg;
+    debug.pitch_deg = debug.pitch_rad * rad_to_deg;
+    debug.yaw_deg = debug.yaw_rad * rad_to_deg;
+    imu_debug_pub_->publish(debug);
 
 
     sensor_msgs::msg::MagneticField
@@ -1007,17 +767,17 @@ private:
       now;
 
     magnetic_field.header.frame_id =
-      "mag_link";
+      imu_frame_id_;
 
 
     magnetic_field.magnetic_field.x =
       data[9];
 
     magnetic_field.magnetic_field.y =
-      data[10];
+      data[10] * yz_sign;
 
     magnetic_field.magnetic_field.z =
-      data[11];
+      data[11] * yz_sign;
 
 
     mag_pub_->publish(
@@ -1116,12 +876,14 @@ private:
     const rclcpp::Time now =
       this->now();
 
+    double dt = 0.0;
+
 
     if (
       last_enc_.nanoseconds()
       != 0)
     {
-      const double dt =
+      dt =
         (now -
         last_enc_)
         .seconds();
@@ -1139,6 +901,8 @@ private:
         right_wheel_position_ +=
           omega_right *
           dt;
+
+        odometry_->update(velocity_left, velocity_right, dt);
       }
     }
 
@@ -1157,6 +921,9 @@ private:
 
     wheel_speeds.header.stamp =
       now;
+
+    wheel_speeds.header.frame_id =
+      base_frame_id_;
 
 
     wheel_speeds.speed[0] =
@@ -1184,6 +951,9 @@ private:
     measured_twist.header.stamp =
       now;
 
+    measured_twist.header.frame_id =
+      base_frame_id_;
+
 
     measured_twist.twist.linear.x =
       (
@@ -1199,6 +969,37 @@ private:
         velocity_left
       ) /
       wheel_base_;
+
+    const auto & odom_state = odometry_->state();
+    tf2::Quaternion odom_orientation;
+    odom_orientation.setRPY(0.0, 0.0, odom_state.yaw);
+
+    nav_msgs::msg::Odometry odometry;
+    odometry.header.stamp = now;
+    odometry.header.frame_id = encoder_odom_frame_id_;
+    odometry.child_frame_id = base_frame_id_;
+    odometry.pose.pose.position.x = odom_state.x;
+    odometry.pose.pose.position.y = odom_state.y;
+    odometry.pose.pose.orientation.x = odom_orientation.x();
+    odometry.pose.pose.orientation.y = odom_orientation.y();
+    odometry.pose.pose.orientation.z = odom_orientation.z();
+    odometry.pose.pose.orientation.w = odom_orientation.w();
+    odometry.twist.twist = measured_twist.twist;
+
+    // The driver has no direct measurement of z, roll or pitch. Large
+    // variances prevent downstream filters from treating those axes as known.
+    odometry.pose.covariance[0] = 0.02;
+    odometry.pose.covariance[7] = 0.02;
+    odometry.pose.covariance[14] = 1.0e6;
+    odometry.pose.covariance[21] = 1.0e6;
+    odometry.pose.covariance[28] = 1.0e6;
+    odometry.pose.covariance[35] = 0.05;
+    odometry.twist.covariance[0] = 0.02;
+    odometry.twist.covariance[7] = 1.0e6;
+    odometry.twist.covariance[14] = 1.0e6;
+    odometry.twist.covariance[21] = 1.0e6;
+    odometry.twist.covariance[28] = 1.0e6;
+    odometry.twist.covariance[35] = 0.05;
 
 
     // ==========================================================
@@ -1240,6 +1041,7 @@ private:
     enc_pub_->publish(
       measured_twist);
 
+    odom_pub_->publish(odometry);
 
     joint_pub_->publish(
       joint_state);
@@ -1356,101 +1158,12 @@ private:
     const uint8_t * data,
     size_t length)
   {
-    if (serial_fd_ < 0) {
-
-      RCLCPP_ERROR(
-        this->get_logger(),
-        "Cannot write because "
-        "the serial port is closed");
-
+    try {
+      serial_port_->write_all(data, length);
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(this->get_logger(), "%s", error.what());
       return false;
     }
-
-
-    size_t offset =
-      0;
-
-
-    while (
-      offset <
-      length)
-    {
-      const ssize_t written =
-        write(
-        serial_fd_,
-        data + offset,
-        length - offset);
-
-
-      if (written > 0) {
-
-        offset +=
-          static_cast<size_t>(
-            written);
-
-        continue;
-      }
-
-
-      if (
-        written < 0 &&
-        errno == EINTR)
-      {
-        continue;
-      }
-
-
-      if (
-        written < 0 &&
-        (
-          errno == EAGAIN ||
-          errno == EWOULDBLOCK
-        ))
-      {
-        pollfd write_poll{
-
-          serial_fd_,
-
-          POLLOUT,
-
-          0
-        };
-
-
-        const int poll_result =
-          poll(
-          &write_poll,
-          1,
-          100);
-
-
-        if (poll_result > 0) {
-
-          continue;
-        }
-
-
-        RCLCPP_ERROR(
-          this->get_logger(),
-          "Timed out while writing "
-          "to the serial port");
-
-
-        return false;
-      }
-
-
-      RCLCPP_ERROR(
-        this->get_logger(),
-        "Serial write failed: %s",
-        std::strerror(
-          errno));
-
-
-      return false;
-    }
-
-
     return true;
   }
 
@@ -1648,24 +1361,8 @@ private:
 
     last_stamp_ =
       stamp;
-
-
-    // Local reception timestamp.
-    //
-    // Watchdog uses LOCAL time,
-    // not sender timestamp.
-    last_cmd_rx_ =
-      now;
-
-
     have_cmd_ =
       true;
-
-
-    // New fresh command:
-    // exit watchdog state.
-    watchdog_active_ =
-      false;
   }
 
 
@@ -1674,100 +1371,21 @@ private:
   //
   // Called at fixed rate.
   //
-  // Default:
-  // 20 ms -> 50 Hz
-  //
-  // This is the actual reference stream seen by STM32.
+  // Latest valid command wins and is kept until a new one arrives.
+  // Before the first valid command, 0,0 is transmitted.
   // ============================================================
 
   void send_reference_()
   {
-    const rclcpp::Time now =
-      this->now();
+    const float v_ref =
+      have_cmd_ ? latest_v_ : 0.0f;
 
-
-    float v_ref =
-      0.0f;
-
-
-    float w_ref =
-      0.0f;
+    const float w_ref =
+      have_cmd_ ? latest_w_ : 0.0f;
 
 
     // ==========================================================
-    // Decide whether latest command is still valid
-    // ==========================================================
-
-    if (
-      have_cmd_ &&
-      last_cmd_rx_.nanoseconds()
-      != 0)
-    {
-      const double elapsed =
-        (
-          now -
-          last_cmd_rx_
-        ).seconds();
-
-
-      if (
-        elapsed <=
-        cmd_timeout_s_)
-      {
-        // ================================================
-        // Fresh reference
-        // ================================================
-
-        v_ref =
-          latest_v_;
-
-
-        w_ref =
-          latest_w_;
-
-      } else {
-
-        // ================================================
-        // Watchdog
-        // ================================================
-
-        v_ref =
-          0.0f;
-
-
-        w_ref =
-          0.0f;
-
-
-        have_cmd_ =
-          false;
-
-
-        if (
-          !watchdog_active_)
-        {
-          RCLCPP_WARN(
-            this->get_logger(),
-            "cmd_vel timeout after %.3f s "
-            "-> forcing STOP",
-            elapsed);
-
-
-          watchdog_active_ =
-            true;
-        }
-      }
-    }
-
-
-    // ==========================================================
-    // Always send reference to STM32
-    //
-    // Fresh command:
-    //     latest v,w
-    //
-    // Timeout / startup:
-    //     0,0
+    // Always send current reference to STM32
     // ==========================================================
 
     if (
@@ -1832,16 +1450,13 @@ private:
     };
 
 
-    if (
-      tcflush(
-        serial_fd_,
-        TCOFLUSH) != 0)
-    {
+    try {
+      serial_port_->flush_output();
+    } catch (const std::exception & error) {
       RCLCPP_WARN(
         this->get_logger(),
         "Could not flush serial output: %s",
-        std::strerror(
-          errno));
+        error.what());
     }
 
 
@@ -1914,44 +1529,12 @@ private:
 
 
 // ================================================================
-// Main
-// ================================================================
-
-int main(
-  int argc,
-  char ** argv)
+namespace stm32_driver
 {
-  rclcpp::init(
-    argc,
-    argv);
 
-
-  try {
-
-    rclcpp::spin(
-      std::make_shared<
-        Stm32Driver>());
-
-  } catch (
-    const std::exception & error)
-  {
-    if (rclcpp::ok()) {
-
-      RCLCPP_FATAL(
-        rclcpp::get_logger(
-          "stm32_driver"),
-        "Driver startup failed: %s",
-        error.what());
-    }
-
-
-    rclcpp::shutdown();
-
-    return 1;
-  }
-
-
-  rclcpp::shutdown();
-
-  return 0;
+std::shared_ptr<rclcpp::Node> make_stm32_driver()
+{
+  return std::make_shared<Stm32Driver>();
 }
+
+}  // namespace stm32_driver
