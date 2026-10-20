@@ -1,6 +1,6 @@
 # STM32 ROS 2 driver
 
-This repository contains the ROS 2 Humble serial driver for the STM32 Nucleo
+This repository contains the ROS 2 Jazzy serial driver for the STM32 Nucleo
 F303RE robot controller. The container builds the driver and the shared
 `robot_interfaces` package from source, then starts the driver automatically.
 
