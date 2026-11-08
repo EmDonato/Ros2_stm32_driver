@@ -1,6 +1,6 @@
 services:
   stm32_driver:
-    image: open-pi-stm32-driver-img
+    image: open-pi-stm32-driver-img:jazzy
     platform: ${ROBOT_PLATFORM:-linux/arm64}
     container_name: open-pi-stm32-driver
     build:

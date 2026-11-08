@@ -1,14 +1,16 @@
-ARG ROS_DISTRO=humble
-FROM ros:${ROS_DISTRO}-ros-base-jammy
+ARG ROS_DISTRO=jazzy
+FROM ros:${ROS_DISTRO}-ros-base-noble
 
 SHELL ["/bin/bash", "-c"]
 
-ARG ROS_DISTRO=humble
+ARG ROS_DISTRO=jazzy
 ARG USERNAME=stm32
 ARG UID=1000
 ARG GID=1000
 
-RUN groupadd --gid ${GID} ${USERNAME} && \
+# Noble reserves UID/GID 1000 for its default ubuntu account.
+RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && \
+    groupadd --gid ${GID} ${USERNAME} && \
     useradd --create-home --uid ${UID} --gid ${GID} --shell /bin/bash ${USERNAME} && \
     usermod --append --groups dialout,video,plugdev ${USERNAME}
 
